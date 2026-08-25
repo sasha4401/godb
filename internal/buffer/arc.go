@@ -16,7 +16,7 @@ const (
 )
 
 type pageMeta struct {
-	frame     *frame
+	frameID   uint32
 	pageID    uint32
 	list      state
 	evictable bool
@@ -57,11 +57,10 @@ func NewArcReplacer(framesNumber uint32) *ArcReplacer {
 	}
 }
 
-func (arc *ArcReplacer) recordAccess(frame *frame) error {
-	pageID := frame.pageID
+func (arc *ArcReplacer) recordAccess(frame, pageID uint32) error {
 	pageInfo := pageMeta{
-		frame:  frame,
-		pageID: pageID,
+		frameID: frame,
+		pageID:  pageID,
 	}
 	arc.mu.Lock()
 	t, ok := arc.inArc[pageID]
@@ -119,8 +118,10 @@ func (arc *ArcReplacer) recordAccess(frame *frame) error {
 
 func (arc *ArcReplacer) replace() (pageMeta, error) {
 	var result pageMeta
+	var elemForReplace *list.Element
 	if arc.mru.Len() > int(arc.p) {
-		elemForReplace := arc.mru.Back()
+		elemForReplace = arc.mru.Back()
+		isJump := false
 		for {
 			if elemForReplace != nil && elemForReplace.Value.(pageMeta).evictable {
 				break
@@ -131,22 +132,16 @@ func (arc *ArcReplacer) replace() (pageMeta, error) {
 				continue
 			}
 
-			if elemForReplace != nil && elemForReplace.Value.(pageMeta).list == mfu && elemForReplace.Prev() == nil {
+			if elemForReplace == nil && isJump {
 				return pageMeta{}, errors.New("nullopt")
 			}
 
 			elemForReplace = arc.mfu.Back()
+			isJump = true
 		}
-
-		meta := elemForReplace.Value.(pageMeta)
-		meta.frame = nil
-		meta.list = mruGhost
-		meta.evictable = true
-		result = elemForReplace.Value.(pageMeta)
-		arc.mru.Remove(elemForReplace)
-		arc.inArc[meta.pageID] = arc.mruGhost.PushFront(meta)
 	} else {
-		elemForReplace := arc.mfu.Back()
+		elemForReplace = arc.mfu.Back()
+		isJump := false
 		for {
 			if elemForReplace != nil && elemForReplace.Value.(pageMeta).evictable {
 				break
@@ -157,18 +152,26 @@ func (arc *ArcReplacer) replace() (pageMeta, error) {
 				continue
 			}
 
-			if elemForReplace != nil && elemForReplace.Value.(pageMeta).list == mru && elemForReplace.Prev() == nil {
+			if elemForReplace == nil && isJump {
 				return pageMeta{}, errors.New("nullopt")
 			}
 
 			elemForReplace = arc.mru.Back()
+			isJump = true
 		}
+	}
 
-		meta := elemForReplace.Value.(pageMeta)
-		meta.frame = nil
+	result = elemForReplace.Value.(pageMeta)
+	meta := elemForReplace.Value.(pageMeta)
+	meta.frameID = 0
+	meta.evictable = true
+	switch elemForReplace.Value.(pageMeta).list {
+	case mru:
+		meta.list = mruGhost
+		arc.mru.Remove(elemForReplace)
+		arc.inArc[meta.pageID] = arc.mruGhost.PushFront(meta)
+	case mfu:
 		meta.list = mfuGhost
-		meta.evictable = true
-		result = elemForReplace.Value.(pageMeta)
 		arc.mfu.Remove(elemForReplace)
 		arc.inArc[meta.pageID] = arc.mfuGhost.PushFront(meta)
 	}
@@ -192,15 +195,15 @@ func (arc *ArcReplacer) removeGhost() {
 	}
 }
 
-func (arc *ArcReplacer) evict() (frame *frame, suc bool) {
+func (arc *ArcReplacer) evict() (frameID uint32, suc bool) {
 	arc.mu.Lock()
 	defer arc.mu.Unlock()
 	f, err := arc.replace()
 	if err != nil {
-		return nil, false
+		return 0, false
 	}
 
-	return f.frame, true
+	return f.frameID, true
 }
 
 func (arc *ArcReplacer) size() int {
@@ -241,6 +244,9 @@ func (arc *ArcReplacer) remove(frame *frame) {
 	defer arc.mu.Unlock()
 	t, ok := arc.inArc[frame.pageID]
 	if !ok {
+		return
+	}
+	if !t.Value.(pageMeta).evictable {
 		return
 	}
 
