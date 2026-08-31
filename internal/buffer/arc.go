@@ -4,6 +4,8 @@ import (
 	"container/list"
 	"errors"
 	"sync"
+
+	"github.com/sasha4401/godb/internal/disk"
 )
 
 type state uint8
@@ -17,7 +19,7 @@ const (
 
 type pageMeta struct {
 	frameID   uint32
-	pageID    uint32
+	pageID    disk.PageID
 	list      state
 	evictable bool
 }
@@ -33,14 +35,14 @@ type ArcReplacer struct {
 	evictableNum uint32
 
 	//map contains info about frames in cache, where key is ID page and value is elem cache
-	inArc map[uint32]*list.Element
+	inArc map[disk.PageID]*list.Element
 
 	mu sync.RWMutex
 }
 
 func NewArcReplacer(framesNumber uint32) *ArcReplacer {
 	p := framesNumber / 2
-	inArc := make(map[uint32]*list.Element)
+	inArc := make(map[disk.PageID]*list.Element)
 	mru := list.New()
 	mfu := list.New()
 	mruGhost := list.New()
@@ -59,7 +61,7 @@ func NewArcReplacer(framesNumber uint32) *ArcReplacer {
 	}
 }
 
-func (arc *ArcReplacer) recordAccess(frame, pageID uint32) error {
+func (arc *ArcReplacer) recordAccess(frame uint32, pageID disk.PageID) error {
 	pageInfo := pageMeta{
 		frameID: frame,
 		pageID:  pageID,

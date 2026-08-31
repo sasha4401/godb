@@ -3,9 +3,11 @@ package buffer
 import (
 	"testing"
 	"time"
+
+	"github.com/sasha4401/godb/internal/disk"
 )
 
-func newTestFrame(pageID uint32) *frame {
+func newTestFrame(pageID disk.PageID) *frame {
 	return &frame{
 		pageID: pageID,
 	}
@@ -498,8 +500,8 @@ func TestArcReplacer_RemoveBehaviorTest(t *testing.T) {
 	{
 		arc := NewArcReplacer(5)
 
-		for i := uint32(0); i < 3; i++ {
-			if err := arc.recordAccess(i, 10+i); err != nil {
+		for i := disk.PageID(0); i < 3; i++ {
+			if err := arc.recordAccess(uint32(i), 10+i); err != nil {
 				t.Fatal(err)
 			}
 
@@ -576,8 +578,8 @@ func TestArcReplacer_RemoveBehaviorTest(t *testing.T) {
 	{
 		arc := NewArcReplacer(3)
 
-		for i := uint32(0); i < 3; i++ {
-			if err := arc.recordAccess(i, 30+i); err != nil {
+		for i := disk.PageID(0); i < 3; i++ {
+			if err := arc.recordAccess(uint32(i), 30+i); err != nil {
 				t.Fatal(err)
 			}
 
@@ -682,8 +684,8 @@ func TestArcReplacer_RemoveBehaviorTest(t *testing.T) {
 	{
 		arc := NewArcReplacer(5)
 
-		for i := uint32(0); i < 5; i++ {
-			if err := arc.recordAccess(i, 60+i); err != nil {
+		for i := disk.PageID(0); i < 5; i++ {
+			if err := arc.recordAccess(uint32(i), 60+i); err != nil {
 				t.Fatal(err)
 			}
 
@@ -714,8 +716,8 @@ func TestArcReplacer_RemoveBehaviorTest(t *testing.T) {
 	{
 		arc := NewArcReplacer(5)
 
-		for i := uint32(0); i < 5; i++ {
-			if err := arc.recordAccess(i, 80+i); err != nil {
+		for i := disk.PageID(0); i < 5; i++ {
+			if err := arc.recordAccess(uint32(i), 80+i); err != nil {
 				t.Fatal(err)
 			}
 
@@ -728,7 +730,7 @@ func TestArcReplacer_RemoveBehaviorTest(t *testing.T) {
 			t.Fatalf("expected size 5, got %d", got)
 		}
 
-		for i := uint32(0); i < 5; i++ {
+		for i := disk.PageID(0); i < 5; i++ {
 			arc.remove(newTestFrame(80 + i))
 		}
 
@@ -747,8 +749,8 @@ func TestArcReplacer_RecordAccessPerformanceTest(t *testing.T) {
 
 	arc := NewArcReplacer(bpmSize)
 
-	for i := uint32(0); i < bpmSize; i++ {
-		if err := arc.recordAccess(i, i); err != nil {
+	for i := disk.PageID(0); i < disk.PageID(bpmSize); i++ {
+		if err := arc.recordAccess(uint32(i), i); err != nil {
 			t.Fatal(err)
 		}
 
@@ -766,7 +768,7 @@ func TestArcReplacer_RecordAccessPerformanceTest(t *testing.T) {
 		start := time.Now()
 
 		for i := uint32(0); i < bpmSize; i++ {
-			if err := arc.recordAccess(accessFrameID, accessFrameID); err != nil {
+			if err := arc.recordAccess(accessFrameID, disk.PageID(accessFrameID)); err != nil {
 				t.Fatal(err)
 			}
 
