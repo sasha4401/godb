@@ -3,10 +3,12 @@ package disk
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
+	"syscall"
 )
 
 const (
@@ -30,7 +32,6 @@ type DiskManager struct {
 	root       string
 	dataDir    string
 	catalogDir string
-	segments   map[string]*os.File
 	tables     map[TableID]string
 	mu         sync.RWMutex
 }
@@ -61,7 +62,6 @@ func Initialize(root string) (*DiskManager, error) {
 		root:       root,
 		dataDir:    dataDir,
 		catalogDir: catalogDir,
-		segments:   make(map[string]*os.File),
 		tables:     make(map[TableID]string),
 		mu:         sync.RWMutex{},
 	}, nil
@@ -69,24 +69,28 @@ func Initialize(root string) (*DiskManager, error) {
 
 func (dm *DiskManager) ReadPage(tableid TableID, pid PageID) ([]byte, error) {
 	dm.mu.RLock()
+	defer dm.mu.RUnlock()
 	tabDir, ok := dm.tables[tableid]
 	if !ok {
-		dm.mu.RUnlock()
 		return nil, ErrInvalidTableId
 	}
 
 	segmentId, offset := pageLocation(pid)
 	segmentDir := filepath.Join(tabDir, "segment"+strconv.Itoa(int(segmentId)))
-	segmentFile, ok := dm.segments[segmentDir]
-	if !ok {
-		dm.mu.RUnlock()
-		return nil, ErrInvalidPageId
-	}
-	dm.mu.RUnlock()
-
-	data := make([]byte, PageSize)
-	dataSize, err := segmentFile.ReadAt(data, offset)
+	file, err := os.OpenFile(segmentDir, os.O_RDWR|os.O_CREATE|syscall.O_DIRECT, 0o640)
 	if err != nil {
+		return nil, fmt.Errorf("failed to open file with O_DIRECT: %w", err)
+	}
+	defer file.Close()
+
+	data, err := makeAlignedBuffer(PageSize)
+	if err != nil {
+		return nil, err
+	}
+	defer syscall.Munmap(data)
+
+	dataSize, err := file.ReadAt(data, offset)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
@@ -94,7 +98,10 @@ func (dm *DiskManager) ReadPage(tableid TableID, pid PageID) ([]byte, error) {
 		return nil, ErrInvalidData
 	}
 
-	return data, nil
+	result := make([]byte, PageSize)
+	copy(result, data)
+
+	return result, nil
 }
 
 func pageLocation(pid PageID) (segmentID uint32, offset int64) {
@@ -106,4 +113,13 @@ func pageLocation(pid PageID) (segmentID uint32, offset int64) {
 	offset = int64(pageInSegment * PageSize)
 
 	return
+}
+
+func makeAlignedBuffer(size int) ([]byte, error) {
+	block, err := syscall.Mmap(-1, 0, size, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_ANON|syscall.MAP_PRIVATE)
+	if err != nil {
+		return nil, fmt.Errorf("failed to allocate aligned memory: %w", err)
+	}
+
+	return block, nil
 }
