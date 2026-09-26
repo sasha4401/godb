@@ -5,9 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
-	"unsafe"
 )
 
 func TestPageLocation(t *testing.T) {
@@ -65,8 +63,9 @@ func TestDiskManager_ReadPage(t *testing.T) {
 		t.Fatalf("failed to write mock segment file: %v", err)
 	}
 
-	t.Run("Successful Read", func(t *testing.T) {
-		data, err := dm.ReadPage(tableID, 0)
+	t.Run("Successful Read Existing Page", func(t *testing.T) {
+		data := make([]byte, PageSize)
+		err := dm.ReadPage(tableID, 0, data)
 		if err != nil {
 			t.Fatalf("unexpected error during ReadPage: %v", err)
 		}
@@ -82,33 +81,49 @@ func TestDiskManager_ReadPage(t *testing.T) {
 
 	t.Run("Invalid Table ID", func(t *testing.T) {
 		var badTableID TableID = 999
-		_, err := dm.ReadPage(badTableID, 0)
-		if !errors.Is(err, ErrInvalidTableId) {
-			t.Errorf("expected error %v, got %v", ErrInvalidTableId, err)
+		data := make([]byte, PageSize)
+		err := dm.ReadPage(badTableID, 0, data)
+		if !errors.Is(err, ErrInvalidTableID) {
+			t.Errorf("expected error %v, got %v", ErrInvalidTableID, err)
 		}
 	})
 
-	t.Run("Missing Segment File", func(t *testing.T) {
-		_, err := dm.ReadPage(tableID, 8192)
-		if err == nil {
-			t.Error("expected error for empty newly created file, got nil")
+	t.Run("Read Non-Existent Page (New Page Scenario)", func(t *testing.T) {
+		data := make([]byte, PageSize)
+		for i := range data {
+			data[i] = 0xFF
+		}
+
+		err := dm.ReadPage(tableID, 8192, data)
+		if err != nil {
+			t.Fatalf("unexpected error for missing segment file: %v", err)
+		}
+
+		zeroPage := make([]byte, PageSize)
+		if !bytes.Equal(data, zeroPage) {
+			t.Error("expected non-existent page to be filled with zeros")
 		}
 	})
-}
 
-func TestMakeAlignedBuffer(t *testing.T) {
-	buf, err := makeAlignedBuffer(PageSize)
-	if err != nil {
-		t.Fatalf("failed to allocate aligned buffer: %v", err)
-	}
-	defer syscall.Munmap(buf)
+	t.Run("Read Partially Written or Empty Existing Segment", func(t *testing.T) {
+		emptySegmentPath := filepath.Join(tableDir, "segment2")
+		if err := os.WriteFile(emptySegmentPath, []byte{}, 0o640); err != nil {
+			t.Fatalf("failed to create empty segment file: %v", err)
+		}
 
-	if len(buf) != PageSize {
-		t.Errorf("expected buffer size %d, got %d", PageSize, len(buf))
-	}
+		data := make([]byte, PageSize)
+		for i := range data {
+			data[i] = 0xAA
+		}
 
-	address := uintptr(unsafe.Pointer(&buf[0]))
-	if address%4096 != 0 {
-		t.Errorf("buffer is not 4096-byte aligned, address: %X", address)
-	}
+		err := dm.ReadPage(tableID, 16384, data)
+		if err != nil {
+			t.Fatalf("unexpected error for empty file: %v", err)
+		}
+
+		zeroPage := make([]byte, PageSize)
+		if !bytes.Equal(data, zeroPage) {
+			t.Error("expected frame to be zeroed when reading from empty file")
+		}
+	})
 }
