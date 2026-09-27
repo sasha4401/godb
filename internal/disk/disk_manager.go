@@ -127,6 +127,38 @@ func (dm *DiskManager) ReadPage(tableid TableID, pid PageID, destFrame []byte) e
 	return nil
 }
 
+func (dm *DiskManager) WritePage(tableid TableID, pid PageID, srcFrame []byte) error {
+	if len(srcFrame) != PageSize {
+		return ErrInvalidData
+	}
+
+	dm.mu.RLock()
+	tabDir, ok := dm.tables[tableid]
+	dm.mu.RUnlock()
+	if !ok {
+		return ErrInvalidTableID
+	}
+
+	segmentID, offset := pageLocation(pid)
+	segmentDir := filepath.Join(tabDir, "segment"+strconv.Itoa(int(segmentID)))
+	file, err := dm.getFile(segmentDir)
+	if err != nil {
+		return ErrOpenFile
+	}
+
+	n, err := file.WriteAt(srcFrame, offset)
+	if err != nil {
+		return fmt.Errorf("failed to write to file: %w", err)
+	}
+
+	if n != PageSize {
+		return ErrInvalidData
+	}
+
+	return nil
+
+}
+
 func pageLocation(pid PageID) (segmentID uint32, offset int64) {
 	pagesPerSegment := SegmentSize / PageSize
 

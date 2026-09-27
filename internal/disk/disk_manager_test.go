@@ -127,3 +127,66 @@ func TestDiskManager_ReadPage(t *testing.T) {
 		}
 	})
 }
+
+func TestDiskManager_WritePage(t *testing.T) {
+	tmpRoot, err := os.MkdirTemp("", "db_write_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpRoot)
+
+	dm, err := Initialize(tmpRoot)
+	if err != nil {
+		t.Fatalf("failed to initialize disk manager: %v", err)
+	}
+
+	var tableID TableID = 1
+	tableDir := filepath.Join(dm.dataDir, "table_1")
+	if err := os.MkdirAll(tableDir, 0o750); err != nil {
+		t.Fatalf("failed to create table dir: %v", err)
+	}
+
+	dm.mu.Lock()
+	dm.tables[tableID] = tableDir
+	dm.mu.Unlock()
+
+	t.Run("Successful Write and Read Back", func(t *testing.T) {
+		writeFrame := make([]byte, PageSize)
+		for i := range writeFrame {
+			writeFrame[i] = byte(i % 128)
+		}
+
+		var pid PageID = 5
+		err := dm.WritePage(tableID, pid, writeFrame)
+		if err != nil {
+			t.Fatalf("unexpected error during WritePage: %v", err)
+		}
+
+		readFrame := make([]byte, PageSize)
+		err = dm.ReadPage(tableID, pid, readFrame)
+		if err != nil {
+			t.Fatalf("unexpected error during ReadPage: %v", err)
+		}
+
+		if !bytes.Equal(readFrame, writeFrame) {
+			t.Error("read data does not match the written data")
+		}
+	})
+
+	t.Run("Write Invalid Data Size", func(t *testing.T) {
+		invalidFrame := make([]byte, PageSize-10)
+		err := dm.WritePage(tableID, 0, invalidFrame)
+		if !errors.Is(err, ErrInvalidData) {
+			t.Errorf("expected error %v, got %v", ErrInvalidData, err)
+		}
+	})
+
+	t.Run("Write Invalid Table ID", func(t *testing.T) {
+		var badTableID TableID = 888
+		frame := make([]byte, PageSize)
+		err := dm.WritePage(badTableID, 0, frame)
+		if !errors.Is(err, ErrInvalidTableID) {
+			t.Errorf("expected error %v, got %v", ErrInvalidTableID, err)
+		}
+	})
+}
