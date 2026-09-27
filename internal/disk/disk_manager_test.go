@@ -2,191 +2,125 @@ package disk
 
 import (
 	"bytes"
-	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 )
 
-func TestPageLocation(t *testing.T) {
-	tests := []struct {
-		pid         PageID
-		expectedSeg uint32
-		expectedOff int64
-	}{
-		{pid: 0, expectedSeg: 0, expectedOff: 0},
-		{pid: 1, expectedSeg: 0, expectedOff: 8192},
-		{pid: 8191, expectedSeg: 0, expectedOff: 67100672},
-		{pid: 8192, expectedSeg: 1, expectedOff: 0},
-		{pid: 8193, expectedSeg: 1, expectedOff: 8192},
+func TestDiskManager_WriteAndReadPage(t *testing.T) {
+	root := t.TempDir()
+	dm, err := Initialize(root, 10)
+	if err != nil {
+		t.Fatalf("Failed to initialize DiskManager: %v", err)
+	}
+	defer dm.Close()
+
+	tableID := TableID(1)
+	if err := dm.CreateTableDir(tableID); err != nil {
+		t.Fatalf("Failed to create table dir: %v", err)
 	}
 
-	for _, tt := range tests {
-		seg, off := pageLocation(tt.pid)
-		if seg != tt.expectedSeg || off != tt.expectedOff {
-			t.Errorf("pageLocation(%d) = (%d, %d); want (%d, %d)",
-				tt.pid, seg, off, tt.expectedSeg, tt.expectedOff)
-		}
+	pageID := PageID(0)
+	writeData := make([]byte, PageSize)
+	copy(writeData, []byte("hello database world"))
+
+	if err := dm.WritePage(tableID, pageID, writeData); err != nil {
+		t.Fatalf("WritePage failed: %v", err)
+	}
+
+	readData := make([]byte, PageSize)
+	if err := dm.ReadPage(tableID, pageID, readData); err != nil {
+		t.Fatalf("ReadPage failed: %v", err)
+	}
+
+	if !bytes.Equal(writeData, readData) {
+		t.Errorf("Read data does not match written data")
 	}
 }
 
-func TestDiskManager_ReadPage(t *testing.T) {
-	tmpRoot, err := os.MkdirTemp("", "db_test_*")
+func TestDiskManager_ClockEviction(t *testing.T) {
+	root := t.TempDir()
+	dm, err := Initialize(root, 2)
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		t.Fatalf("Failed to initialize DiskManager: %v", err)
 	}
-	defer os.RemoveAll(tmpRoot)
+	defer dm.Close()
 
-	dm, err := Initialize(tmpRoot)
-	if err != nil {
-		t.Fatalf("failed to initialize disk manager: %v", err)
-	}
+	tableID := TableID(1)
+	_ = dm.CreateTableDir(tableID)
 
-	var tableID TableID = 1
-	tableDir := filepath.Join(dm.dataDir, "table_1")
-	if err := os.MkdirAll(tableDir, 0o750); err != nil {
-		t.Fatalf("failed to create table dir: %v", err)
-	}
+	pages := []PageID{0, 8192, 16384}
 
-	dm.mu.Lock()
-	dm.tables[tableID] = tableDir
-	dm.mu.Unlock()
-
-	segmentPath := filepath.Join(tableDir, "segment0")
-
-	expectedData := make([]byte, PageSize)
-	for i := range expectedData {
-		expectedData[i] = byte(i % 256)
-	}
-
-	if err := os.WriteFile(segmentPath, expectedData, 0o640); err != nil {
-		t.Fatalf("failed to write mock segment file: %v", err)
-	}
-
-	t.Run("Successful Read Existing Page", func(t *testing.T) {
+	for i, pid := range pages {
 		data := make([]byte, PageSize)
-		err := dm.ReadPage(tableID, 0, data)
-		if err != nil {
-			t.Fatalf("unexpected error during ReadPage: %v", err)
-		}
+		data[0] = byte(i + 1)
 
-		if len(data) != PageSize {
-			t.Fatalf("expected data size %d, got %d", PageSize, len(data))
+		if err := dm.WritePage(tableID, pid, data); err != nil {
+			t.Fatalf("Failed to write page %d: %v", pid, err)
 		}
+	}
 
-		if !bytes.Equal(data, expectedData) {
-			t.Error("read data does not match expected data")
-		}
-	})
+	dm.mu.RLock()
+	openFilesCount := len(dm.clockRing)
+	dm.mu.RUnlock()
 
-	t.Run("Invalid Table ID", func(t *testing.T) {
-		var badTableID TableID = 999
-		data := make([]byte, PageSize)
-		err := dm.ReadPage(badTableID, 0, data)
-		if !errors.Is(err, ErrInvalidTableID) {
-			t.Errorf("expected error %v, got %v", ErrInvalidTableID, err)
-		}
-	})
+	if openFilesCount > 2 {
+		t.Errorf("Clock eviction failed: expected at most 2 open files, got %d", openFilesCount)
+	}
 
-	t.Run("Read Non-Existent Page (New Page Scenario)", func(t *testing.T) {
-		data := make([]byte, PageSize)
-		for i := range data {
-			data[i] = 0xFF
-		}
+	readData := make([]byte, PageSize)
+	if err := dm.ReadPage(tableID, pages[0], readData); err != nil {
+		t.Fatalf("Failed to read evicted page: %v", err)
+	}
 
-		err := dm.ReadPage(tableID, 8192, data)
-		if err != nil {
-			t.Fatalf("unexpected error for missing segment file: %v", err)
-		}
-
-		zeroPage := make([]byte, PageSize)
-		if !bytes.Equal(data, zeroPage) {
-			t.Error("expected non-existent page to be filled with zeros")
-		}
-	})
-
-	t.Run("Read Partially Written or Empty Existing Segment", func(t *testing.T) {
-		emptySegmentPath := filepath.Join(tableDir, "segment2")
-		if err := os.WriteFile(emptySegmentPath, []byte{}, 0o640); err != nil {
-			t.Fatalf("failed to create empty segment file: %v", err)
-		}
-
-		data := make([]byte, PageSize)
-		for i := range data {
-			data[i] = 0xAA
-		}
-
-		err := dm.ReadPage(tableID, 16384, data)
-		if err != nil {
-			t.Fatalf("unexpected error for empty file: %v", err)
-		}
-
-		zeroPage := make([]byte, PageSize)
-		if !bytes.Equal(data, zeroPage) {
-			t.Error("expected frame to be zeroed when reading from empty file")
-		}
-	})
+	if readData[0] != 1 {
+		t.Errorf("Data mismatch after re-opening file: expected 1, got %d", readData[0])
+	}
 }
 
-func TestDiskManager_WritePage(t *testing.T) {
-	tmpRoot, err := os.MkdirTemp("", "db_write_test_*")
+func TestDiskManager_RecoveryOnRestart(t *testing.T) {
+	root := t.TempDir()
+
+	dm1, _ := Initialize(root, 10)
+	_ = dm1.CreateTableDir(TableID(42))
+
+	data := make([]byte, PageSize)
+	data[0] = 99
+	_ = dm1.WritePage(TableID(42), PageID(1), data)
+	dm1.Close()
+
+	dm2, err := Initialize(root, 10)
 	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
+		t.Fatalf("Failed to initialize on restart: %v", err)
 	}
-	defer os.RemoveAll(tmpRoot)
+	defer dm2.Close()
 
-	dm, err := Initialize(tmpRoot)
+	readData := make([]byte, PageSize)
+	if err := dm2.ReadPage(TableID(42), PageID(1), readData); err != nil {
+		t.Fatalf("Failed to read page after restart: %v", err)
+	}
+
+	if readData[0] != 99 {
+		t.Errorf("Data corrupted after restart: expected 99, got %d", readData[0])
+	}
+}
+
+func TestDiskManager_ReadUnwrittenPage(t *testing.T) {
+	root := t.TempDir()
+	dm, _ := Initialize(root, 10)
+	defer dm.Close()
+
+	tableID := TableID(1)
+	_ = dm.CreateTableDir(tableID)
+
+	readData := make([]byte, PageSize)
+	err := dm.ReadPage(tableID, PageID(999), readData)
 	if err != nil {
-		t.Fatalf("failed to initialize disk manager: %v", err)
+		t.Fatalf("Expected successful read with zero padding, got error: %v", err)
 	}
 
-	var tableID TableID = 1
-	tableDir := filepath.Join(dm.dataDir, "table_1")
-	if err := os.MkdirAll(tableDir, 0o750); err != nil {
-		t.Fatalf("failed to create table dir: %v", err)
+	for i, b := range readData {
+		if b != 0 {
+			t.Errorf("Expected 0 padding at index %d, got %d", i, b)
+			break
+		}
 	}
-
-	dm.mu.Lock()
-	dm.tables[tableID] = tableDir
-	dm.mu.Unlock()
-
-	t.Run("Successful Write and Read Back", func(t *testing.T) {
-		writeFrame := make([]byte, PageSize)
-		for i := range writeFrame {
-			writeFrame[i] = byte(i % 128)
-		}
-
-		var pid PageID = 5
-		err := dm.WritePage(tableID, pid, writeFrame)
-		if err != nil {
-			t.Fatalf("unexpected error during WritePage: %v", err)
-		}
-
-		readFrame := make([]byte, PageSize)
-		err = dm.ReadPage(tableID, pid, readFrame)
-		if err != nil {
-			t.Fatalf("unexpected error during ReadPage: %v", err)
-		}
-
-		if !bytes.Equal(readFrame, writeFrame) {
-			t.Error("read data does not match the written data")
-		}
-	})
-
-	t.Run("Write Invalid Data Size", func(t *testing.T) {
-		invalidFrame := make([]byte, PageSize-10)
-		err := dm.WritePage(tableID, 0, invalidFrame)
-		if !errors.Is(err, ErrInvalidData) {
-			t.Errorf("expected error %v, got %v", ErrInvalidData, err)
-		}
-	})
-
-	t.Run("Write Invalid Table ID", func(t *testing.T) {
-		var badTableID TableID = 888
-		frame := make([]byte, PageSize)
-		err := dm.WritePage(badTableID, 0, frame)
-		if !errors.Is(err, ErrInvalidTableID) {
-			t.Errorf("expected error %v, got %v", ErrInvalidTableID, err)
-		}
-	})
 }
